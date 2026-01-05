@@ -1,0 +1,396 @@
+---
+title: "Sahadeo_Assignment4-1"
+author: "Rishi Sahadeo"
+date: "2025-09-27"
+output: html_document
+---
+```{r}
+library(ISLR)
+library(leaps)
+library(lars)
+
+# check structure
+head(Auto)
+
+# remove name column
+auto_data <- Auto[, -c(9)]
+
+# Define functions
+matrix.2ndorder.make <- function(x, only.quad = FALSE) {
+  x0 <- x
+  dimn <- dimnames(x)[[2]]
+  num.col <- length(x[1, ])
+  for (i in 1:num.col) {
+    if (!only.quad) {
+      for (j in i:num.col) {
+        x0 <- cbind(x0, x[, i] * x[, j])
+        dimn <- c(dimn, paste(dimn[i], dimn[j], sep = ""))
+      }
+    } else {
+      x0 <- cbind(x0, x[, i] * x[, i])
+      dimn <- c(dimn, paste(dimn[i], "2", sep = ""))
+    }
+  }
+  dimnames(x0)[[2]] <- dimn
+  return(x0)
+}
+```
+
+# create 2nd order models for each country
+```{r}
+
+## Us data
+us_data <- auto_data[auto_data[, "origin"] == 1, ]
+us_mpg <- us_data[, 1]
+us_predictors <- scale(us_data[, -c(1, 8)])
+us_quad_x <- as.matrix(matrix.2ndorder.make(us_predictors))
+
+# European data
+europe_data <- auto_data[auto_data[, "origin"] == 2, ]
+europe_mpg <- europe_data[, 1]
+europe_predictors <- scale(europe_data[, -c(1, 8)])
+europe_quad_x <- as.matrix(matrix.2ndorder.make(europe_predictors))
+
+# Japan Data
+japan_data <- auto_data[auto_data[, "origin"] == 3, ]
+japan_mpg <- japan_data[, 1]
+japan_predictors <- scale(japan_data[, -c(1, 8)])
+japan_quad_x <- as.matrix(matrix.2ndorder.make(japan_predictors))
+
+```
+
+# split the data into training and test sets
+```{r}
+set.seed(1917)
+
+# us data split
+n_us <- nrow(us_quad_x)
+n_train_us <- floor(0.7 * n_us)
+train_indices_us <- sample(1:n_us, n_train_us)
+us_train_x <- us_quad_x[train_indices_us, ]
+us_train_y <- us_mpg[train_indices_us]
+us_test_x <- us_quad_x[-train_indices_us, ]
+us_test_y <- us_mpg[-train_indices_us]
+
+# europe data split
+n_europe <- nrow(europe_quad_x)
+n_train_europe <- floor(0.7 * n_europe)
+train_indices_europe <- sample(1:n_europe, n_train_europe)
+europe_train_x <- europe_quad_x[train_indices_europe, ]
+europe_train_y <- europe_mpg[train_indices_europe]
+europe_test_x <- europe_quad_x[-train_indices_europe, ]
+europe_test_y <- europe_mpg[-train_indices_europe]
+
+# japan data split
+n_japan <- nrow(japan_quad_x)
+n_train_japan <- floor(0.7 * n_japan)
+train_indices_japan <- sample(1:n_japan, n_train_japan)
+japan_train_x <- japan_quad_x[train_indices_japan, ]
+japan_train_y <- japan_mpg[train_indices_japan]
+japan_test_x <- japan_quad_x[-train_indices_japan, ]
+japan_test_y <- japan_mpg[-train_indices_japan]
+```
+
+# leaps model selection
+```{r}
+
+# helper fuction to calculate perss
+regpluspress <- function(x, y) {
+  
+  # ols regression
+  str <- lsfit(x, y)
+  
+  # check for singularity
+  if( str$qr$rank < ncol(x) + 1){
+    return (list(press = 1e+12, resid = NULL))
+  }
+  leverages <- rowSums(qr.Q(str$qr)^2)
+  
+  # calculate press using formula
+  press <- sum((str$resid / (1 - leverages))^2)
+  
+  return(list(press = press, resid = str$resid))
+}
+
+leaps.then.press <- function(xmat, yvec, ncheck = 5) {
+  
+  # bind predictors
+  temp_data <- as.data.frame(xmat)
+  temp_data$y <- yvec
+  
+  # run regsbsets to find top models on Cp
+  leaps.str <- tryCatch({
+    regsubsets(y ~ ., data = temp_data, nbest = ncheck, nvmax = ncol(xmat))
+  }, error = function(e){
+    cat("Error in regsubsets: ", conditionMessage(e), "\n")
+    return(NULL)
+  })
+  
+  if(is.null(leaps.str)) return(NULL)
+  
+  # summary of results
+  leaps_summary <- summary(leaps.str)
+  cp_values <- leaps_summary$cp
+  
+  # order models by cp calue
+  row_index <- order(cp_values)
+  
+  # get indicator matrix for top models
+  matwhich <- leaps_summary$which[row_index[1:ncheck], ]
+  top_models <- cp_values[row_index[1:ncheck]]
+  
+  Pressvec <- NULL
+  for(i in 1:ncheck){
+    
+    # extract predictor columns
+    current_predictors_which <- matwhich[i, -1]
+    
+    # handle case when only intercept is in the model
+    if(sum(current_predictors_which) == 0) {
+      current_predictors <- matrix(0, nrow = nrow(xmat), ncol = 0)
+    }else{
+      current_predictors <- xmat[, current_predictors_which, drop = FALSE]
+    }
+    ls.str0 <- tryCatch({
+      regpluspress(current_predictors, yvec)
+    }, error = function(e){
+      cat("Error in PRESS calculation for model ", i, ": ", conditionMessage(e),
+          "\n")
+      return(list(press = 1e+12))
+    })
+    Pressvec <- c(Pressvec, ls.str0$press)
+  }
+  
+  min_press <- order(Pressvec)
+  best_index_in_top5 <- min_press[1]
+  
+  best_which <- matwhich[best_index_in_top5, ]
+  
+  print(best_which)
+  
+  return(best_which)
+  
+}
+```
+
+# run leaps for all countries
+```{r}
+
+# US DATA
+us_best_leaps <- leaps.then.press(us_train_x, us_train_y, ncheck = 5)
+
+# European Data
+europe_best_leaps <- leaps.then.press(europe_train_x, europe_train_y, ncheck = 5)
+
+# Japan Data
+japan_best_leaps <- leaps.then.press(japan_train_x, japan_train_y, ncheck = 5)
+
+```
+
+# Lars model selection
+```{r}
+
+# function to find the best lars model based on Cp
+lars.select <- function(xmat, yvec){
+  
+  lasso.str <- tryCatch({
+    lars(xmat, yvec, type = "lasso")
+  }, error = function(e){
+    cat("Error in LARS: ", conditionMessage(e), "\n")
+    return(NULL)
+  })
+  if(is.null(lasso.str)) return(NULL)
+  
+  # get cp values
+  lars_summary <- summary(lasso.str)
+  cp_values <- lars_summary$Cp
+  
+  # find best index of the model
+  best_index <- which.min(cp_values)
+  
+  # extract coefficents for the model at best index
+  best_coefs <- coef(lasso.str)[best_index, ]
+  
+  # Print the best Cp value
+  cat("Best LARS model selected by Cp:\n")
+  cat(sprintf("Cp: %.4f, Number of variables: %d", 
+                cp_values[best_index], 
+                sum(best_coefs != 0)))
+  
+  return(best_coefs)
+}
+```
+
+# Run LARS model for all 3 countries
+```{r}
+cat(" US Data (LARS)\n")
+us_best_lars_coef <- lars.select(us_train_x, us_train_y)
+
+cat(" Europe Data (LARS)\n")
+europe_best_lars_coef <- lars.select(europe_train_x, europe_train_y)
+
+cat(" Japan Data (LARS)\n")
+japan_best_lars_coef <-lars.select(japan_train_x, japan_train_y)
+```
+
+# Comparison and analysis
+```{r}
+# Prediction and plotting
+make_predictions <- function(xmat, coefs) {
+  
+  intercept <- if ("(Intercept)" %in% names(coefs)) coefs["(Intercept)"] else 0
+  coefs <- coefs[names(coefs) != "(Intercept)"]
+  full_coefs <- rep(0, ncol(xmat))
+  match_indices <- match(names(coefs), colnames(xmat))
+  valid_indices <- !is.na(match_indices)
+  full_coefs[match_indices[valid_indices]] <- coefs[valid_indices]
+  xmat %*% full_coefs + intercept
+}
+
+plot_predictions <- function(predictions, actual_y, title_text) {
+  
+  
+  correlation <- tryCatch({
+    cor(predictions, actual_y)
+  }, error = function(e) {
+    cat("Error in correlation calculation: ", conditionMessage(e), "\n")
+    return(NA)
+  })
+  
+  mse <- tryCatch({
+    mean((predictions - actual_y)^2)
+  }, error = function(e) {
+    cat("Error in MSE calculation: ", conditionMessage(e), "\n")
+    return(NA)
+  })
+  
+  plot(actual_y, predictions,
+       main = paste(title_text, "\nCorrelation: ", 
+                    ifelse(is.na(correlation), "NA", round(correlation, 4)), 
+                    ", MSE: ", ifelse(is.na(mse), "NA", round(mse, 4))),
+       xlab = "Actual MPG",
+       ylab = "Predicted MPG")
+  abline(0, 1, col = "red", lty = 2)
+  cat(title_text, " - Correlation: ", round(correlation, 4), 
+      ", MSE: ", round(mse, 4), "\n")
+}
+```
+
+# Predictions, Correlations and plots for all 3 countries
+```{r}
+# US Data
+
+us_lars_fit <- lars(us_train_x, us_train_y, type = "lasso")
+us_leaps_model <- lsfit(us_train_x[, us_best_leaps[-1], drop = FALSE],
+                        us_train_y)
+us_best_leaps_coefs <- us_leaps_model$coefficients
+names(us_best_leaps_coefs) <- c("(Intercept)",
+                                colnames(us_train_x)[us_best_leaps[-1]])
+us_leaps_preds <- make_predictions(us_test_x[, us_best_leaps[-1],
+                                             drop = FALSE], us_best_leaps_coefs)
+us_lars_preds <- predict(us_lars_fit, us_test_x,
+                         s = which.min(summary(us_lars_fit)$Cp) - 1,
+                         type = "fit")$fit
+
+par(mfrow = c(1, 2))
+plot_predictions(us_leaps_preds, us_test_y, "US Leaps Model Predictions")
+plot_predictions(us_lars_preds, us_test_y, "US LARS Model Predictions")
+
+# Europe Data
+europe_lars_fit <- lars(europe_train_x, europe_train_y, type = "lasso")
+europe_leaps_model <- lsfit(europe_train_x[, europe_best_leaps[-1]],
+                            europe_train_y)
+europe_best_leaps_coefs <- europe_leaps_model$coefficients
+names(europe_best_leaps_coefs) <- c("(Intercept)",
+                                    colnames(europe_train_x)
+                                    [europe_best_leaps[-1]])
+europe_leaps_preds <- make_predictions(europe_test_x[, europe_best_leaps[-1]],
+                                       europe_best_leaps_coefs)
+europe_lars_preds <- predict(europe_lars_fit, europe_test_x,
+                             s = which.min(summary(europe_lars_fit)$Cp) - 1,
+                             type = "fit")$fit
+
+par(mfrow = c(1, 2))
+plot_predictions(europe_leaps_preds, europe_test_y,
+                 "Europe Leaps Model Predictions")
+plot_predictions(europe_lars_preds, europe_test_y,
+                 "Europe LARS Model Predictions")
+
+# Japan Data
+japan_lars_fit <- lars(japan_train_x, japan_train_y, type = "lasso")
+japan_leaps_model <- lsfit(japan_train_x[, japan_best_leaps[-1]], japan_train_y)
+japan_best_leaps_coefs <- japan_leaps_model$coefficients
+names(japan_best_leaps_coefs) <- c("(Intercept)",
+                                   colnames(japan_train_x)[japan_best_leaps[-1]])
+japan_leaps_preds <- make_predictions(japan_test_x[, japan_best_leaps[-1]],
+                                      japan_best_leaps_coefs)
+japan_lars_preds <- predict(japan_lars_fit, japan_test_x,
+                            s = which.min(summary(japan_lars_fit)$Cp) - 1,
+                            type = "fit")$fit
+
+par(mfrow = c(1, 2))
+plot_predictions(japan_leaps_preds, japan_test_y, "Japan Leaps Model Predictions")
+plot_predictions(japan_lars_preds, japan_test_y, "Japan LARS Model Predictions")
+```
+
+# Comparison
+```{r}
+
+# US
+us_leaps_vars <- names(us_best_leaps[-1])[us_best_leaps[-1]]
+us_lars_vars <- names(us_best_lars_coef[us_best_lars_coef != 0])
+cat("US Models Different: ", !setequal(us_leaps_vars, us_lars_vars), "\n")
+cat("US Leaps Vars: ", paste(us_leaps_vars, collapse = ", "), "\n")
+cat("US LARS Vars: ", paste(us_lars_vars, collapse = ", "), "\n")
+cat("US Design: Leaps suggests ", paste(us_leaps_vars, collapse = ", "), 
+    "; LARS suggests ", paste(us_lars_vars, collapse = ", "), 
+    ". Common focus on ", paste(intersect(us_leaps_vars, us_lars_vars),
+                                collapse = ", "), 
+    " indicates key factors like displacement and acceleration for MPG.\n")
+
+# Europe
+europe_leaps_vars <- names(europe_best_leaps[-1])[europe_best_leaps[-1]]
+europe_lars_vars <- names(europe_best_lars_coef[europe_best_lars_coef != 0])
+cat("Europe Models Different: ", !setequal(europe_leaps_vars, europe_lars_vars),
+    "\n")
+cat("Europe Leaps Vars: ", paste(europe_leaps_vars, collapse = ", "), "\n")
+cat("Europe LARS Vars: ", paste(europe_lars_vars, collapse = ", "), "\n")
+cat("Europe Design: Leaps suggests ", paste(europe_leaps_vars, collapse = ", "), 
+    "; LARS suggests ", paste(europe_lars_vars, collapse = ", "), 
+    ". Common focus on ", paste(intersect(europe_leaps_vars, europe_lars_vars),
+                                collapse = ", "), 
+    " indicates horsepower and year as key for MPG.\n")
+
+# Japan
+japan_leaps_vars <- names(japan_best_leaps[-1])[japan_best_leaps[-1]]
+japan_lars_vars <- names(japan_best_lars_coef[japan_best_lars_coef != 0])
+cat("Japan Models Different: ", !setequal(japan_leaps_vars, japan_lars_vars),
+    "\n")
+cat("Japan Leaps Vars: ", paste(japan_leaps_vars, collapse = ", "), "\n")
+cat("Japan LARS Vars: ", paste(japan_lars_vars, collapse = ", "), "\n")
+cat("Japan Design: Leaps suggests ", paste(japan_leaps_vars, collapse = ", "), 
+    "; LARS suggests ", paste(japan_lars_vars, collapse = ", "), 
+    ". Common focus on ", paste(intersect(japan_leaps_vars, japan_lars_vars),
+                                collapse = ", "), 
+    " indicates cylinders as critical for MPG.\n")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
