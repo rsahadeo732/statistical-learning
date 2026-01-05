@@ -1,0 +1,220 @@
+---
+title: "Sahadeo_Assignment7_NOAA"
+author: "Rishi Sahadeo"
+date: "2025-10-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-data}
+
+# read files
+A <- read.csv("C:\\Users\\supaq\\OneDrive\\Desktop\\Rutgers Courses\\Statistical Learning - Fall 2025\\Lecture Code\\NOAAnewA.csv", check.names = FALSE)
+
+N <- read.csv("C:\\Users\\supaq\\OneDrive\\Desktop\\Rutgers Courses\\Statistical Learning - Fall 2025\\Lecture Code\\NOAAnew.csv", check.names = FALSE)
+
+# drop unnecessary columns
+if("Unnamed: 0" %in% names(A)) {
+  A <- A[, setdiff(names(A), "Unnamed: 0")]
+}
+
+# check data
+str(A)
+str(N)
+```
+
+
+
+```{r noaab}
+
+# remove leftover index col if present
+if (nchar(names(A)[1]) == 0 && is.integer(A[[1]]) && all(A[[1]] == seq_len(nrow(A)))) {
+  A <- A[, -1]
+}
+
+# lock column order from A
+cols <- names(A)
+
+# helper map calendar year to scaled year used in A
+scale_year <- function(y) (y - 1980) / 10
+
+# last calendar year represented in A
+last_yr_in_A <- 1980 + 10 * max(A$year)
+
+# years in N that come after A
+years_to_add <- N$year[N$year > last_yr_in_A]
+
+# add rows if needed else keep A
+if (length(years_to_add) > 0) {
+  # rows for the missing years
+  add_df <- subset(N, year %in% years_to_add)
+
+  # make columns to match A exactly
+  add_df$year <- scale_year(add_df$year)
+  add_df$`NOAA0$year^2` <- add_df$year^2
+  add_df$`NOAA0$delta.temp^2` <- add_df$delta.temp^2
+  add_df$`NOAA0$year * NOAA0$delta.temp` <- add_df$year * add_df$delta.temp
+
+  # clean names and reorder to A
+  names(add_df) <- trimws(names(add_df))
+  add_df <- add_df[, cols]
+  A <- A[, cols]
+
+  # stack to form noaanewb
+  NOAAnewB <- rbind(A, add_df)
+} else {
+  NOAAnewB <- A
+}
+
+# quick check
+cat("noaanewb columns:\n"); print(names(NOAAnewB))
+summary(NOAAnewB$year)
+tail(NOAAnewB)
+
+
+```
+
+```{r multilayer-net-greedy}
+
+# activation (hidden)
+my.logistic <- function(z) exp(z) / (1 + exp(z))
+
+# one-row forward pass (multilayer)
+my.eval1.nnet.ml <- function(Xrow, w0, hidden, output, num.layers = 1) {
+  # p = inputs incl intercept
+  p <- length(Xrow)
+
+  # split: input->hidden weights first (p*hidden)
+  w01 <- w0[1:(p * hidden)]
+  w0A <- w0[-(1:(p * hidden))]
+
+  # reshape to p x hidden
+  W1 <- matrix(w01, nrow = p, ncol = hidden)
+
+  # first hidden preact and act
+  a <- t(Xrow) %*% W1
+  z <- my.logistic(a)
+
+  # extra hidden layers if num.layers > 1
+  if (num.layers > 1) {
+    layers_left <- num.layers - 1
+    while (layers_left > 0) {
+      # next hidden->hidden block (hidden*hidden)
+      w_hh <- w0A[1:(hidden * hidden)]
+      w0A  <- w0A[-(1:(hidden * hidden))]
+      W_hh <- matrix(w_hh, nrow = hidden, ncol = hidden)
+      a    <- z %*% W_hh
+      z    <- my.logistic(a)
+      layers_left <- layers_left - 1
+    }
+  }
+
+  # last vector are hidden->output weights (length hidden)
+  w2 <- w0A
+  out <- sum(w2 * z)          # linear output for regression
+  if (output == "binary") {   # (not used here)
+    out <- my.logistic(out)
+  }
+  out
+}
+
+# dataset loss (adds L2 penalty lambda * sum(w^2))
+my.eval2.nnet.ml <- function(w0, X, Y, hidden, output, num.layers, lambda) {
+  zfunc <- function(row) my.eval1.nnet.ml(row, w0, hidden, output, num.layers)
+  pred  <- apply(X, 1, zfunc)
+  if (output == "binary") {
+    llik <- (-1) * sum(log(pred) * Y + log(1 - pred) * (1 - Y))
+  } else {
+    llik <- sum((pred - Y)^2)
+  }
+  llik_pen <- llik + lambda * sum(w0^2)
+  list(llik = llik_pen, pred = pred, y = Y, raw = llik)
+}
+
+# trainer (wraps optim around multilayer forward+loss)
+my.neuralnet.multilayer <- function(X0, Y, hidden = 4, output = "linear",
+                                    num.layers = 2, lambda = 0.003) {
+  # add intercept
+  X <- cbind(1, X0)
+  p <- ncol(X)
+
+  # init all weights:
+  # input->hidden: p*hidden
+  # hidden->hidden: (num.layers-1)*hidden*hidden
+  # hidden->output: hidden
+  w_len <- p * hidden + (num.layers - 1) * hidden * hidden + hidden
+  w0    <- rnorm(w_len)
+
+  # objective for optim (minimize)
+  obj <- function(w) my.eval2.nnet.ml(w, X, Y, hidden, output, num.layers, lambda)$llik
+
+  # optimize with conjugate gradient
+  fit <- optim(w0, obj, method = "CG")
+
+  # return best weights and score
+  list(par = fit$par, val = fit$val)
+}
+
+# greedy restarts (keep best)
+Greedy <- function(X0, Y, hidden = 4, output = "linear",
+                   num.layers = 2, lambda = 0.003, trials = 15) {
+  # plotting grid
+  oldpar <- par(no.readonly = TRUE); on.exit(par(oldpar), add = TRUE)
+  par(mfrow = c(4, 4))
+
+  best <- my.neuralnet.multilayer(X0, Y, hidden, output, num.layers, lambda)
+  cat("trial 1: val =", best$val, "\n")
+
+  # quick diagnostic plot for trial 1
+  X <- cbind(1, X0)
+  d1 <- my.eval2.nnet.ml(best$par, X, Y, hidden, output, num.layers, lambda)
+  plot(d1$pred, Y, main = paste("trial 1, val =", round(best$val, 3)),
+       xlab = "prediction", ylab = "observed")
+
+  # more trials
+  for (i in 2:trials) {
+    cand <- my.neuralnet.multilayer(X0, Y, hidden, output, num.layers, lambda)
+    cat("trial", i, ": val =", cand$val, "\n")
+
+    d <- my.eval2.nnet.ml(cand$par, X, Y, hidden, output, num.layers, lambda)
+    plot(d$pred, Y, main = paste("trial", i, "val =", round(cand$val, 3)),
+         xlab = "prediction", ylab = "observed")
+
+    if (cand$val < best$val) best <- cand
+  }
+
+  # final diag on best
+  db <- my.eval2.nnet.ml(best$par, X, Y, hidden, output, num.layers, lambda)
+  plot(db$pred, Y, main = paste("best val =", round(best$val, 3)),
+       xlab = "prediction", ylab = "observed")
+
+  invisible(list(best = best, pred = db$pred, y = Y))
+}
+
+# prepare X and Y from noaanewb
+Y  <- NOAAnewB$`X.disaster`
+X0 <- NOAAnewB[, setdiff(names(NOAAnewB), "X.disaster")]
+
+# run greedy (regression)
+set.seed(123)
+gfit <- Greedy(X0, Y,
+               hidden = 4,
+               output = "linear",
+               num.layers = 2,
+               lambda = 0.003,
+               trials = 15)
+
+
+```
+
+```{r best-val}
+
+# print final best val
+best_val <- gfit$best$val
+cat("best penalized objective (val):", round(best_val, 3), "\n")
+
+
+```
