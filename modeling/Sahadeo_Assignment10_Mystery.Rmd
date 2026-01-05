@@ -1,0 +1,72 @@
+---
+title: "Sahadeo_Assignment10_Mystery"
+author: "Rishi Sahadeo"
+date: "2025-11-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, eval=FALSE}
+movie.peru <-
+function(depth=350,depth.nw=200, dis.vec=c(8:13))
+{
+library(scatterplot3d)
+sctstr<-scatterplot3d(Peru[,c(2,3,4)],type="n")
+
+# id columns
+IDmat<-Peru[,24:27]
+IDmat[,2]<-IDmat[,2]*2
+IDmat[,3]<-IDmat[,3]*3
+IDmat[,4]<-IDmat[,4]*4
+
+# event times used to pace the movie
+ztime<-Peru[,1]
+
+# window length
+nlag=20
+
+#loop through time with window, id points pi
+# number of frames that slide
+nz<-length(ztime)-nlag
+
+# loop over frames
+for(i in 1:nz){
+
+# rows
+v9<-c(i:(i+nlag))
+icolvec<-apply(IDmat[v9,],1,sum)
+
+#this loop sets delay in movie
+time.count<-floor(1000*(ztime[i+nlag]-ztime[i+(nlag-1)]))
+
+# creates pause proportional to time count
+for(j in 1:(2*time.count)){
+v1<-rnorm(100)
+
+# inner loop to stretch the wait
+for(k in 1:100){
+  v2<-sample(v1,replace=T)
+  mean(v2)
+}
+}
+
+#Perumat<-cbind(Peru[,c(1,2,3)],sqrt(Peru[,4]))
+sctstr<-scatterplot3d(Peru[,c(2,3,4)],type="n")
+sctstr$points3d(Peru[v9,c(2,3,4)],col=icolvec,type="h",lwd=((exp(Peru[v9,5]-4))))
+#print(c(i,nz,ztime[i],ztime[nz]))
+
+}
+print("DONE")
+}
+```
+
+```
+
+
+
+
+
+
