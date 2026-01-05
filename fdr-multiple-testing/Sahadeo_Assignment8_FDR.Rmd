@@ -1,0 +1,232 @@
+---
+title: "Sahadeo_Assignment8_FDR"
+author: "Rishi Sahadeo"
+date: "2025-10-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-renal}
+
+# load NC160 data
+library(ISLR)
+
+# identify which rows from renal
+I1 <- NCI60$labs == "RENAL"
+
+# subset the data to only renal rows
+renal <- NCI60$data[I1, ]
+
+# define tcalc
+tcalc <- function(x) {
+  
+  # number of renal samples
+  n1 <- length(x)
+  
+  # avg for this gene
+  xbar <- mean(x)
+  
+  # standard deviation
+  sd_x <- sd(x)
+  
+  # one sample t statsitic
+  tstat <- xbar / (sd_x / sqrt(n1))
+  
+  # one tailed p value from t distribution CDF
+  pt(tstat, n1 - 1)
+}
+
+# computer per gene p-value for ernal
+psmall.renal <- apply(renal, 2, tcalc)
+
+# the other tail, gives complementary one sided p values
+plarge.renal <- 1 - psmall.renal
+
+length(psmall.renal)
+length(plarge.renal)
+
+
+```
+
+
+```{r setup-function}
+
+# define FDR function to fill in
+myfdr <- function(pvals, q, indep = TRUE){
+  
+  # store number of tests, this is our m
+  m <- length(pvals)
+  
+  # dataframe that tracks index and its pvalues
+  df <- data.frame(
+    original_index = seq_along(pvals),
+    
+    # actual pvalues
+    pval = pvals
+  )
+  
+  # sort dataframe by pvals in ascending order
+  p_order <- order(df$pval)
+  
+  # reorddrs df rows by increasing pval
+  df_sorted <- df[p_order, ]
+  
+  # add rank
+  df_sorted$rank_i <- seq_len(m)
+  
+  # compute threshold curve to use is indep is false
+  cm <- sum(1 / seq_len(m))
+  
+  # in indep is true, use standard BH - tests are independent
+  if(indep){
+    df_sorted$threshold <- (df_sorted$rank_i / m) * q
+  } else{
+    
+    # id dep is false we use BY - tests are dependent
+    df_sorted$threshold <- (df_sorted$rank_i / m) * (q / cm)
+  }
+  
+  # find the largest rank i wher pval <= threshold
+  passed <- df_sorted$pval <= df_sorted$threshold
+  
+  # if one passed we want the max i
+  if(any(passed)) {
+    cutoff_rank <- max(df_sorted$rank_i[passed])
+  } else{
+    cutoff_rank <- 0
+  }
+  
+  # if cutoff_rank >0, rank_i <= cutoff_rank is called discovery,
+  # otherwise no discoveries
+  if(cutoff_rank >0 ){
+    sig_p_cutoff <- df_sorted$pval[df_sorted$rank_i == cutoff_rank]
+    
+    # any pvalue <= that cutoff pvalue is significant
+    discovered_sorted <- df_sorted$pval <= sig_p_cutoff
+  }else{
+    discovered_sorted <- rep(FALSE, m)
+  }
+  
+  # logical vector 
+  discovered_original_order <- rep(FALSE, m)
+  discovered_original_order[ df_sorted$original_index[discovered_sorted]] <- TRUE
+  
+  # plot the graph
+  plot(
+    
+    # rank index
+    x = df_sorted$rank_i,
+    
+    # sorted p values
+    y = df_sorted$pval,
+    main = paste0(
+      "FDR plot (q = ", q,
+      ", indep = ", indep, ")"
+    ),
+    xlab = "Rank i (1 = smallest p value)",
+    ylab = "p-value",
+    
+    # smaller dots
+    pch = 16
+  )
+  
+  # add BH/BY threshold curve
+  lines(
+    x = df_sorted$rank_i,
+    y = df_sorted$threshold,
+    
+    # thick visible lines
+    lwd = 2
+  )
+  
+  #  return a list of useful results
+   return(list(
+     
+     # true/false in original order
+     discoveries = discovered_original_order,
+     
+     # largest rank that passed
+     cutoff_rank = cutoff_rank,
+     
+     # true means BH false means BY
+     assumed_independence = indep,
+     
+     # has rank_i, pval, threshold
+     sorted_table = df_sorted
+   ))
+  
+}
+
+```
+
+
+```{r run-fdr}
+
+# psmall.renal = lower-tail p-values
+
+# bh
+out_small_indep <- myfdr(psmall.renal, q = 0.05, indep = TRUE)   
+
+# by
+out_small_dep   <- myfdr(psmall.renal, q = 0.05, indep = FALSE)  
+
+# plarge.renal = upper-tail p-values
+
+# bh
+out_large_indep <- myfdr(plarge.renal, q = 0.05, indep = TRUE)   
+
+# by
+out_large_dep   <- myfdr(plarge.renal, q = 0.05, indep = FALSE)  
+
+```
+
+```{r summary}
+
+#  summarize an fdr run in a readable way
+show_summary <- function(result_obj, label_text) {
+  
+  # which tests (original order) got called interesting
+  which_disc <- which(result_obj$discoveries)
+  
+  # how many interesting tests total
+  num_disc <- sum(result_obj$discoveries)
+  
+  cat("\n----- ", label_text, " -----\n", sep = "")
+  cat("assumed_independence: ", result_obj$assumed_independence, "\n", sep = "")
+  cat("cutoff_rank i*: ", result_obj$cutoff_rank, "\n", sep = "")
+  cat("number of discoveries: ", num_disc, "\n", sep = "")
+  
+  # just show first few discoveries so we don't print 6000 lines
+  if(num_disc > 0){
+    cat("first few discovery indices in original order: ",
+        head(which_disc, 20), "\n\n")
+  } else {
+    cat("no discoveries at this q\n\n")
+  }
+}
+
+# summarize all 4 runs we did above
+show_summary(out_small_indep, "psmall.renal BH (indep = TRUE)")
+show_summary(out_small_dep,   "psmall.renal BY (indep = FALSE)")
+show_summary(out_large_indep, "plarge.renal BH (indep = TRUE)")
+show_summary(out_large_dep,   "plarge.renal BY (indep = FALSE)")
+
+
+```
+
+In this assignment I implemented the basic Benjamini-Hochberg FDR procedure in R without using p.adjust(). The function takes:  
+
+1. A vector of p-values.
+2. a desired FDR level q.
+3. a TRUE/FALSE input to say whether we assume independence.  
+
+If indep - TRUE, the code uses the standard BH thresholds (i/m)q. After sorting the p-values and finding the largest one that passes the threshold, the code maps the discoveries back to the original order. The program also makes the plot: 
+
+  - sorted p-values vs rank with the FDR line added.
+  
+I tested the function on the two required vectors, psmall.renal and plarge.renal, under both assumptions, independent and not independent, and the code is commented throughout.
+
+
