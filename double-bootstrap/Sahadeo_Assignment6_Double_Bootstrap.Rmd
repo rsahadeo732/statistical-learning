@@ -1,0 +1,154 @@
+---
+title: "Sahadeo_double_bootstrap"
+author: "Rishi Sahadeo"
+date: "2025-10-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r data}
+
+# for reproducibility
+set.seed(1718)
+
+# load data that contains special.sample
+source("C:\\Users\\supaq\\OneDrive\\Desktop\\Rutgers Courses\\Statistical Learning - Fall 2025\\Lecture Code\\xy.pck")
+
+# make numeric
+special.sample <- as.numeric(special.sample)
+
+# data on the data
+length(special.sample)
+summary(special.sample)
+```
+
+```{r bootstrap-se}
+# estimate the standard error of any statistic
+bootstrap_se <- function(x, stat_fun, B = 500){
+  n <- length(x)
+  
+  # loopless bootstrap
+  # each col is a bootstrap resample
+  theta_star <- replicate(B, {
+    
+    # bootstrap indices
+    idx <- sample.int(n, size = n, replace = TRUE)
+    
+    # stats on resampe
+    stat_fun(x[idx])
+  })
+  
+  # bootstrap standard error is the standard deviation of the bootstrap
+  # distribution
+  se_hat <- sd(theta_star)
+  return(se_hat)
+  
+}
+
+```
+
+```{r check}
+bootstrap_se(special.sample, mean, B = 500)
+bootstrap_se(special.sample, median, B = 500)
+```
+
+```{r studentized_ci_func}
+
+bootstrap_studentized_ci <- function(x, stat_fun, B_outer = 2000, B_inner = 500,
+                                      conf = 0.95){
+  stopifnot(is.numeric(x), is.function(stat_fun), length(x) > 1,
+            B_outer >= 500, B_inner >= 200, conf > 0 && conf < 1)
+  
+  n <- length(x)
+  alpha <- 1 - conf
+  
+  # point estimate of original sample
+  theta_hat <- stat_fun(x)
+  
+  # se at the original sample
+  se_hat_orig <- bootstrap_se(x, stat_fun, B = B_inner)
+  
+  # studentized bootstrap distribution
+  T_star <- replicate(B_outer,{
+    
+    # bootstrap indices
+    idx <- sample.int(n, size = n, replace = TRUE)
+    
+    # outser resample
+    x_b <- x[idx]
+    
+    # thetastar on resample
+    th_b <- stat_fun(x_b)
+    
+    # inner bootstrap se computer on resample
+    se_b <- bootstrap_se(x_b, stat_fun, B = B_inner)
+    
+    # studentized pivot
+    (th_b - theta_hat) / se_b
+  })
+  
+  # two sided quantiles of t star
+  q_lower <- quantile(T_star, probs = 1 - alpha/2, names = FALSE)
+  q_upper <- quantile(T_star, probs = alpha/2, names = FALSE)
+  
+  # invert the pivot ti get the CI for theta
+  ci_lower <- theta_hat - q_lower * se_hat_orig
+  ci_upper <- theta_hat - q_upper * se_hat_orig
+  
+  list(
+    estimate = theta_hat,
+    se_estimate = se_hat_orig,
+    T_quantiles = c(q_lower = q_lower, q_upper = q_upper),
+    conf_level = conf,
+    ci = c(lower = ci_lower, upper = ci_upper)
+  )
+}
+
+```
+
+```{r apply-mean-median}
+
+# 95% CI for the mean using studentized bootstrap
+ci_mean <- bootstrap_studentized_ci(
+  x = special.sample,
+  stat_fun = mean,
+  B_outer = 2000,
+  B_inner = 500,
+  conf = 0.95
+)
+
+# 95% CI for median using same studentized bootstrap
+ci_median <- bootstrap_studentized_ci(
+  x = special.sample,
+  stat_fun = median,
+  B_outer = 2000,
+  B_inner = 500,
+  conf = 0.95
+)
+
+# output
+cat("\n--- Results (Studentized Double Bootstrap, 95% CI) ---\n")
+cat(sprintf("Mean   estimate: %8.4f | SE_hat: %7.4f | CI: [%8.4f, %8.4f]\n",
+            ci_mean$estimate,  ci_mean$se_estimate,  ci_mean$ci["lower"],
+            ci_mean$ci["upper"]))
+cat(sprintf("Median estimate: %8.4f | SE_hat: %7.4f | CI: [%8.4f, %8.4f]\n",
+            ci_median$estimate,ci_median$se_estimate,ci_median$ci["lower"],
+            ci_median$ci["upper"]))
+```
+
+## Results
+
+Rishi Sahadeo
+Professor Michael LuValle
+Statistical Learning: 01:960:486
+7 October 2025
+Assignment 6
+
+This program builds on Assignment 3 by using a user-provided statistic (stat_fun) instead of just the mean. It estimates the standard error by calling a separate bootstrap function (bootstrap_se) inside the main bootstrap (bootstrap_studentized_ci), creating a double bootstrap. This studentized double bootstrap improves on the single bootstrap from Assignment 3 by estimating SE via resampling, offering second-order accuracy for skewed data like special.sample. The sample size is 100, with a range from -25.219 to 39.921, indicating skewness.
+
+The main function, bootstrap_studentized_ci, uses this nested method to compute 95% confidence intervals for any statistic, applied here to the mean and median of special.sample.
+
+The results show the mean is 2.8823 with a 95% CI of [0.6715, 4.9938], and the median is 3.5534 with a 95% CI of [1.8219, 5.9581]. The 95% CIs suggest the data center, as estimated by the mean and median, lies broadly between approximately 1.8 and 5.96, with point estimates of 2.8823 and 3.5534. The median’s narrower interval reflects its robustness to the lower outlier (-25.219), while the mean’s wider interval is influenced by this skewness, consistent with Assignment 3’s findings on lognormal data coverage improvement with larger samples.
