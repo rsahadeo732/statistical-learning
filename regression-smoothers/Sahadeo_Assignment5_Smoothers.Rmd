@@ -1,0 +1,562 @@
+---
+title: "Sahadeo_PressSmoothers"
+author: "Rishi Sahadeo"
+date: "2025-10-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# read the CSV into and object
+noaa <- read.csv("C:\\Users\\supaq\\OneDrive\\Desktop\\Rutgers Courses\\Statistical Learning - Fall 2025\\Lecture Code\\NOAAnew.csv")
+
+source("C:/Users/supaq/OneDrive/Desktop/Rutgers Courses/Statistical Learning - Fall 2025/Lecture Code/smoother.pck")
+
+# set x = column 3 (temperature rise)
+predictor_x <- as.numeric(noaa[, 3])
+
+# set y = column 2 (rate of billion dollar weather disasters)
+response_y <-as.numeric(noaa[,2])
+
+# scatterplot to confirm we loaded the right columns
+plot(predictor_x,response_y,
+     xlab = "Temp Rise",
+     ylab = "Rate of billion dollar disasters",
+     pch =16)
+```
+
+```{r press}
+
+set.seed(1212)
+
+# PRESS inputs to numeric and avoid divide-by-zero
+press_sdiag <- function(actual, fitted, smoother_diag) {
+  actual       <- as.numeric(actual)
+  fitted       <- as.numeric(fitted)
+  smoother_diag<- as.numeric(smoother_diag)
+  
+  # r_i
+  residuals <- actual - fitted
+  
+  # 1 - S_ii
+  denom     <- 1 - smoother_diag  
+  
+  # clip tiny/invalid
+  denom[!is.finite(denom) | abs(denom) < 1e-8] <- 1e-8  
+  
+  # PRESS
+  val <- sum((residuals / denom)^2)          
+  if (!is.finite(val)) val <- .Machine$double.xmax / 1e8
+  val
+}
+
+# This calculates the Hat matrix H=X(X'WX)^-1 X'W
+my.hat.w <-
+function(x, wt){
+    x1 <- cbind(1,x)
+    
+    # Calculate the Hat matrix H = X * (X'WX)^-1 * X'W
+    x1 %*% solve(t(x1) %*% diag(wt) %*% x1) %*% t(x1) %*% (diag(wt))
+}
+
+
+```
+
+```{r bin-mean-smoother}
+
+# bin mean smoother divides the x value into r bins and replaces y_i w/ meanof bins
+bin.mean <- function(x_values, y_values, r) {
+  
+  # set up bin edges r+1 breakpoints acorss the range of x
+  bin_breaks <- seq(min(x_values), max(x_values), length.out = r + 1)
+  
+  # assign each observation to its bin
+  bin_index <- pmin(findInterval(x_values, bin_breaks, rightmost.closed = TRUE),
+                    r)
+  
+  # allocate vectors for fitted values and diag of S
+  fitted_values <- numeric(length(y_values))
+  smoother_diag <- numeric(length(y_values))
+  
+  # loop throug each bin
+  for (b in 1:r) {
+    
+    # fit indices of points in bin b
+    in_bin <- which(bin_index == b)
+    if(length(in_bin) > 0){
+      
+      # fitted values = bin avg
+      fitted_values[in_bin] <-mean(y_values[in_bin])
+      
+      #S_ii for each point in bin
+      smoother_diag[in_bin] <- 1 / length(in_bin)
+    }
+  }
+  
+  # return results, including PRESS using our helper
+  list(
+    fitted = fitted_values,
+    Sdiag = smoother_diag,
+    PRESS = press_sdiag(y_values, fitted_values, smoother_diag)
+  )
+}
+
+```
+
+```{r gaussian-kernel}
+
+# gaussian kernel function
+gaussian_kernel <- function(u) exp(-0.5 * u * u)
+
+# gaussian kernel mean
+gauss.mean <- function(x_values, y_values, bandwidth){
+  
+  # get number of obs
+  num_obs <- length(y_values)
+  
+  # allocate fitted values vector
+  fitted_values <- numeric(num_obs)
+  
+  # allocate diagonal S_ii vector
+  smoother_diag <- numeric(num_obs)
+  
+  # loop over each target point
+  for(i in 1:num_obs){
+    
+    # compute scaled distances
+    distances_scaled <- (x_values - x_values[i]) / bandwidth
+    
+    # compute unnormalized gaussian weights
+    weights_raw <- gaussian_kernel(distances_scaled)
+    
+    # compute sum of weights for normalization
+    weights_sum <- sum(weights_raw)
+    
+    # compute normalized weights row
+    if(weights_sum == 0) {
+      
+      fitted_values[i] <- y_values[i]
+      smoother_diag[i] <- 0
+    } else {
+      weights_norm <- weights_raw / weights_sum
+      
+      # compute fitted value
+      fitted_values[i] <- sum(weights_norm * y_values)
+      
+      # set diag entry S_ii = normalized self weight
+      smoother_diag[i] <- weights_norm[i]
+    }
+  }
+  
+  # return fitted values, diag, and PRESS via LOO
+  list(
+    fitted = fitted_values,
+    Sdiag = smoother_diag,
+    PRESS = press_sdiag(y_values, fitted_values, smoother_diag)
+  )
+}
+```
+
+```{r gauss-reg}
+
+# gaussian local linear regression with bandwidth 
+gauss.reg <- function(x_values, y_values, bandwidth){
+  
+  # number of obs
+  num_obs <- length(y_values)
+  
+  # allocate outputs
+  fitted_values <- numeric(num_obs)
+  smoother_diag <- numeric(num_obs)
+  
+  # loop for every target x_i
+  for(i in 1:num_obs){
+    
+    # scaled distances for weights
+    distances_scaled <- (x_values - x_values[i]) / bandwidth
+    
+    # raw weights
+    weights_raw <- gaussian_kernel(distances_scaled)
+    
+    # sum of weights
+    weights_sum <- sum(weights_raw)
+    
+    # handle degenerate case (no weight mass)
+    if(weights_sum == 0) {
+      # Fixed: Use identity smoother
+      fitted_values[i] <- y_values[i]
+      smoother_diag[i] <- 0
+    } else {
+      # normalized weights
+      weights_norm <- weights_raw / weights_sum
+      
+      # diagonal weight matrix for WLS
+      W_matrix <- diag(weights_norm, num_obs, num_obs)
+      
+      # local design matrix centered at x_i: intercept + (x - x_i)
+      design_matrix <- cbind(1, x_values - x_values[i])
+      
+      # normal equations components
+      XtW <- t(design_matrix) %*% W_matrix
+      XtWX <- XtW %*% design_matrix
+      
+      # local coefficients beta
+      beta_hat <- solve(XtWX, XtW %*% y_values)
+      
+      # fitted value at x_i is the intercept
+      fitted_values[i] <- beta_hat[1]
+      
+      # influence row at x_i
+      influence_row <- c(1, 0) %*% solve(XtWX, XtW)
+      
+      # diagonal S_ii is the i-th element of that row
+      smoother_diag[i] <- influence_row[i]
+    }
+  }
+  
+  # compute PRESS and return
+  list(
+    fitted = fitted_values,
+    Sdiag = smoother_diag,
+    PRESS = press_sdiag(y_values, fitted_values, smoother_diag)
+  )
+}
+```
+
+```{r truncated}
+# truncated gaussian mean
+gauss.mean.trunc <- function(x_values, y_values, bandwidth,
+                                       truncation_width){
+  
+  # number of observations
+  num_obs <- length(y_values)
+  
+  # allocate outputs
+  fitted_values <- numeric(num_obs)
+  smoother_diag <- numeric(num_obs)
+  
+  # loop over each target
+  for(i in 1:num_obs) {
+    
+    # absolute distances from x_i
+    distances_abs <- abs(x_values - x_values[i])
+    
+    # logical mask of neighbors inside the trunc window
+    use_neighbor <- distances_abs <= truncation_width
+    
+    # handle degenerate case, no neighbors
+    if(!any(use_neighbor)) {
+      fitted_values[i] <- y_values[i]
+      smoother_diag[i] <- 0
+    } else{
+      
+      # scaled distances on the kept subset
+      distances_scaled_subset <- (x_values[use_neighbor] - x_values[i])/bandwidth
+      
+      # raw weights on the subset
+      weights_raw_subset <- gaussian_kernel(distances_scaled_subset)
+      
+      # normalize weights on the subset
+      weights_sum_subset <- sum(weights_raw_subset)
+      weights_norm_subset <- weights_raw_subset / weights_sum_subset
+      
+      # fitted value from subset only
+      fitted_values[i] <- sum(weights_norm_subset * y_values[use_neighbor])
+      
+      # S_ii = self_weight if i is included in subset, or 0
+      if(use_neighbor[i]){
+        
+        # position of i within the subset indices
+        pos_in_subset <- which(which(use_neighbor) == i)
+        smoother_diag[i] <- weights_norm_subset[pos_in_subset]
+      } else {
+        smoother_diag[i] <- 0
+      }
+    }
+  }
+  # compute the press
+  list(
+    fitted = fitted_values,
+    Sdiag = smoother_diag,
+    PRESS = press_sdiag(y_values, fitted_values, smoother_diag)
+  )
+}
+```
+
+```{r TGLLR}
+
+# truncated gaussian local linear regression
+gauss.reg.trunc <- function(x_values, y_values, bandwidth,
+                                            truncation_width){
+  # number of observations
+  num_obs <- length(y_values)
+
+  # outputs
+  fitted_values <- numeric(num_obs)
+  smoother_diag <- numeric(num_obs)
+
+  # loop ove each target
+  for(i in 1:num_obs){
+  
+  # absolute distances
+  distance_abs <- abs(x_values - x_values[i])
+  
+  # choose neighbor
+  use_neighbor <- distance_abs <= truncation_width
+  
+  # handle no neighbor case
+  if(!any(use_neighbor)) {
+    fitted_values[i] <- y_values[i]
+    smoother_diag[i] <- 0
+  } else{
+    # scaled distances on subset
+    distances_scaled_subset <- (x_values[use_neighbor] - x_values[i]) / bandwidth
+    
+    # raw weights
+    weights_raw_subset <- gaussian_kernel(distances_scaled_subset)
+    
+    # normalized weights on subset
+    weights_sum_subset <- sum(weights_raw_subset)
+    weights_norm_subset <- weights_raw_subset / weights_sum_subset
+    
+    # diagonal weight matrix on sub
+    W_matrix_subset <- diag(weights_norm_subset, sum(use_neighbor),
+                           sum(use_neighbor))
+    
+    # centered local design on subset
+    design_matrix_subset <- cbind(1, x_values[use_neighbor] - x_values[i])
+    
+    # normal equation
+    XtW_subset <-t(design_matrix_subset) %*% W_matrix_subset
+    XtWX_subset <- XtW_subset %*% design_matrix_subset
+    
+    # local coefficients
+    beta_hat_subset <- solve(XtWX_subset, XtW_subset %*% y_values[use_neighbor])
+    
+    # fitted value at x_i is intercept
+    fitted_values[i] <- beta_hat_subset[1]
+    
+    # influence row on subset
+    influence_row_subset <- c(1, 0) %*% solve(XtWX_subset, XtW_subset)
+    
+    # s_ii - the element corresponding to i if i is included
+    if(use_neighbor[i]) {
+      pos_in_subset <- which(which(use_neighbor) == i)
+      smoother_diag[i] <- influence_row_subset[pos_in_subset]
+    } else {
+      smoother_diag[i] <- 0
+    }
+   }
+  }
+  
+  # compute press
+  list(
+    fitted = fitted_values,
+    Sdiag = smoother_diag,
+    PRESS = press_sdiag(y_values, fitted_values, smoother_diag)
+  )
+}
+  
+
+```
+
+```{r slide-parameters}
+# apply the slide parameters
+
+# run bin mean with 6 bins
+fit_bin_6 <- bin.mean(predictor_x, response_y, r = 6)
+
+# run gaussian mean with bandwidth 0.063
+fit_gm_0063 <- gauss.mean(predictor_x, response_y,
+                                          bandwidth = 0.063)
+
+# run gaussian local linear w/ bandwidth 0.078
+fit_gr_0078 <- gauss.reg(predictor_x, response_y,
+                                               bandwidth = 0.078)
+
+## run truncated gaussian mean 
+fit_gm_trunc <- gauss.mean.trunc(predictor_x, response_y,
+                                           bandwidth = 0.063,
+                                           truncation_width = 20)
+
+# run truncated gaussian local linear
+fit_gr_trunc <- gauss.reg.trunc(predictor_x, response_y,
+                                                bandwidth = 0.08,
+                                                truncation_width = 17)
+```
+
+```{r Greedy-random}
+
+
+# greedy random search: minimize an objective (PRESS) over parameter vector
+greedy_random_search <- function(press_evaluator, start_params, step_sizes,
+                                 lower_bounds, upper_bounds,
+                                 max_consecutive_no_improve = 200) {
+  
+  # initialize with starting parameters
+  best_params <- start_params
+  
+  # evaluate PRESS at the start
+  best_press  <- press_evaluator(best_params)
+  
+  # count non-improving proposals
+  no_improve_count <- 0
+  
+  # iterate until too many consecutive non-improvements
+  while (no_improve_count < max_consecutive_no_improve) {
+    
+    # propose a random perturbation (Gaussian noise scaled by step sizes)
+    proposal <- best_params + rnorm(length(start_params)) * step_sizes
+    
+    # clamp proposal to bounds
+    proposal <- pmax(lower_bounds, pmin(upper_bounds, proposal))
+    
+    # evaluate PRESS at the proposal
+    proposal_press <- press_evaluator(proposal)
+    
+    # accept if strictly better
+    if (proposal_press < best_press) {
+      best_press  <- proposal_press
+      best_params <- proposal
+      no_improve_count <- 0
+    } else {
+      no_improve_count <- no_improve_count + 1
+    }
+  }
+  
+  # return best parameters and their PRESS
+  list(params = best_params, press = best_press)
+}
+
+
+```
+
+```{r wrappers}
+
+# bin-mean objective: parameter = num_bins (rounded to integer >= 2)
+press_bin_mean <- function(param_vec) {
+  
+  # round and clamp bins
+  proposed_bins <- max(2, round(param_vec[1]))
+  
+  # compute press
+  bin.mean(predictor_x, response_y, proposed_bins)$PRESS
+}
+
+# Gaussian mean objective: parameter = bandwidth
+press_gaussian_mean <- function(param_vec) {
+  
+  proposed_bandwidth <- as.numeric(param_vec[1])
+  gauss.mean(predictor_x, response_y, proposed_bandwidth)$PRESS
+}
+
+# Gaussian local linear objective: parameter = bandwidth
+press_gaussian_local_linear <- function(param_vec) {
+  proposed_bandwidth <- as.numeric(param_vec[1])
+  gauss.reg(predictor_x, response_y, proposed_bandwidth)$PRESS
+}
+
+# Truncated Gaussian mean objective: parameters = (bandwidth, truncation_width)
+press_gaussian_mean_trunc <- function(param_vec) {
+  proposed_bandwidth <- as.numeric(param_vec[1])
+  proposed_trunc     <- as.numeric(param_vec[2])
+  gauss.mean.trunc(predictor_x,
+                                 response_y, 
+                                 bandwidth = proposed_bandwidth, 
+                                 truncation_width = proposed_trunc)$PRESS
+}
+
+# Truncated Gaussian local linear objective: parameters = (bandwidth, truncation_width)
+press_gaussian_local_linear_trunc <- function(param_vec) {
+  proposed_bandwidth <- as.numeric(param_vec[1])
+  proposed_trunc     <- as.numeric(param_vec[2])
+  gauss.reg.trunc(predictor_x, 
+                                         response_y, 
+                                         bandwidth = proposed_bandwidth,
+                                         truncation_width =  proposed_trunc)  $PRESS
+}
+
+
+```
+
+```{r tuner}
+
+# tune bin-mean: start at 6 bins, allow 2..50
+tuned_bin <- greedy_random_search(
+  press_evaluator = press_bin_mean,
+  start_params    = c(6),
+  step_sizes      = c(2),
+  lower_bounds    = c(2),
+  upper_bounds    = c(50)
+)
+
+# tune Gaussian mean: start at h=0.063, allow [0.005, 0.5]
+tuned_gm <- greedy_random_search(
+  press_evaluator = press_gaussian_mean,
+  start_params    = c(0.063),
+  step_sizes      = c(0.02),
+  lower_bounds    = c(0.005),
+  upper_bounds    = c(0.5)
+)
+
+# tune Gaussian local linear: start at h=0.078, allow [0.005, 0.5]
+tuned_gr <- greedy_random_search(
+  press_evaluator = press_gaussian_local_linear,
+  start_params    = c(0.078),
+  step_sizes      = c(0.02),
+  lower_bounds    = c(0.005),
+  upper_bounds    = c(0.5)
+)
+
+# tune truncated Gaussian mean: start (0.063, 20), allow h in [0.005, 0.5],
+#T in [1, 100]
+tuned_gm_trunc <- greedy_random_search(
+  press_evaluator = press_gaussian_mean_trunc,
+  start_params    = c(0.063, 20),
+  step_sizes      = c(0.02, 5),
+  lower_bounds    = c(0.005, 1),
+  upper_bounds    = c(0.5, 100)
+)
+
+# tune truncated Gaussian local linear: start (0.08, 17)
+tuned_gr_trunc <- greedy_random_search(
+  press_evaluator = press_gaussian_local_linear_trunc,
+  start_params    = c(0.08, 17),
+  step_sizes      = c(0.02, 5),
+  lower_bounds    = c(0.005, 1),
+  upper_bounds    = c(0.5, 100)
+)
+
+```
+
+```{r results}
+# Print fixed params PRESS
+print("Fixed Params PRESS:")
+print(paste("Bin Mean (r=6): ", fit_bin_6$PRESS))
+print(paste("Gaussian Mean (h=0.063): ", fit_gm_0063$PRESS))
+print(paste("Gaussian Local Linear (h=0.078): ", fit_gr_0078$PRESS))
+print(paste("Trunc Gaussian Mean (h=0.063, T=20): ", fit_gm_trunc$PRESS))
+print(paste("Trunc Gaussian Local Linear (h=0.08, T=17): ", fit_gr_trunc$PRESS))
+
+# Print tuned results
+print("Tuned Params and PRESS:")
+
+print(paste("Bin Mean: Params = ", tuned_bin$params, " PRESS = ",
+            tuned_bin$press))
+print(paste("Gaussian Mean: Params = ", tuned_gm$params, " PRESS = ",
+            tuned_gm$press))
+print(paste("Gaussian Local Linear: Params = ", tuned_gr$params, " PRESS = ",
+            tuned_gr$press))
+print(paste("Trunc Gaussian Mean: Params = ", tuned_gm_trunc$params, " PRESS = ",
+            tuned_gm_trunc$press))
+print(paste("Trunc Gaussian Local Linear: Params = ", tuned_gr_trunc$params, "
+            PRESS = ", tuned_gr_trunc$press))
+
+```
+
+## Conclusion
+
+Among the smoothers tested on the NOAA dataset, the bin mean smoother demonstrated the best predictive accuracy, achieving the lowest PRESS value of approximately 416.9 with around five bins. The Gaussian and local linear smoothers performed less effectively, with PRESS values ranging from approximately 460 to 500, indicating that the relationship between temperature rise and the rate of billion-dollar disasters is relatively coarse and not highly sensitive to bandwidth adjustments. The truncated versions yielded results similar to their full counterparts, suggesting that restricting the neighborhood window had minimal impact on fit quality. Overall, the simpler bin-mean model appears adequate to capture the underlying trend in the data.
